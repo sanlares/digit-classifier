@@ -1,0 +1,6 @@
+# Test dependencies. Deliberately excludes torch: the suite exercises the
+# serving path, which is exactly what the production image contains.
+-r requirements.txt
+
+pytest==8.4.2
+httpx==0.28.1     # required by fastapi.testclient

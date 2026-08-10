@@ -1,0 +1,22 @@
+# What `gcloud run deploy --source .` must NOT upload to Cloud Build.
+# Without this file gcloud uploads the whole directory — 1.5 GB of virtualenv
+# and MNIST data for a build that needs a few Python files.
+
+.venv/
+__pycache__/
+*.pyc
+.git/
+.DS_Store
+
+# Downloaded on demand by the training scripts
+data/
+
+# Training artifacts and notebooks: the image is built from serving code only
+*.pth
+*.ipynb
+
+# Model artifacts are fetched from object storage at runtime, never baked in
+*.onnx
+
+*.png
+!docs/demo.png

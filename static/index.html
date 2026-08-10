@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MNIST Digit Classifier</title>
+<style>
+  :root {
+    --bg: #0f1116; --panel: #171a21; --line: #262b36;
+    --text: #e8eaf0; --muted: #8b93a7; --accent: #6ea8fe; --accent2: #f0a04b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 20px; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .cols { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 18px;
+  }
+  #canvas {
+    background: #fff; border-radius: 8px; cursor: crosshair;
+    touch-action: none; display: block;
+  }
+  .controls { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
+  button {
+    font: inherit; font-size: 14px; padding: 8px 14px; border-radius: 8px;
+    border: 1px solid var(--line); background: #1e232d; color: var(--text);
+    cursor: pointer;
+  }
+  button:hover { border-color: #3a4253; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
+  label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  input[type=range] { accent-color: var(--accent); width: 90px; }
+  .right { flex: 1; min-width: 340px; }
+  .preview { display: flex; gap: 14px; align-items: center; margin-bottom: 18px; }
+  .preview img {
+    width: 112px; height: 112px; image-rendering: pixelated;
+    border: 1px solid var(--line); border-radius: 6px; background: #000;
+  }
+  /* Until you draw something the thumbnail shows a dimmed sample digit, so the
+     slot is never empty nor a broken-image icon. */
+  .preview img.ph { opacity: 0.3; }
+  .preview .cap { font-size: 12px; color: var(--muted); }
+  .model { margin-bottom: 18px; }
+  .model h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em;
+              color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  .verdict { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+  .digit { font-size: 40px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .conf { font-size: 13px; color: var(--muted); }
+  .bars { display: grid; grid-template-columns: 14px 1fr 46px; gap: 3px 8px; align-items: center; }
+  .bars span { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .bar { height: 8px; background: #232936; border-radius: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 4px; transition: width .15s ease; }
+  .mlp .bar i { background: var(--accent2); }
+  .cnn .bar i { background: var(--accent); }
+  .mlp .digit { color: var(--accent2); }
+  .cnn .digit { color: var(--accent); }
+  .empty { color: var(--muted); font-size: 14px; }
+  .err { color: #ff8a8a; font-size: 13px; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
+  code { background: #1e232d; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>MNIST Digit Classifier</h1>
+  <div class="sub">Draw a digit. It gets normalised to 28×28 MNIST format and scored by the trained MLP and CNN.</div>
+
+  <div class="cols">
+    <div class="panel">
+      <canvas id="canvas" width="280" height="280"></canvas>
+      <div class="controls">
+        <button class="primary" id="predict">Predict</button>
+        <button id="clear">Clear</button>
+        <label>Stroke <input type="range" id="width" min="8" max="36" value="22"></label>
+      </div>
+      <label style="margin-top:10px"><input type="checkbox" id="live" checked> Predict on release</label>
+    </div>
+
+    <div class="right panel">
+      <div class="preview">
+        <img id="prev" alt="" class="ph">
+        <div class="cap">Actual model input<br>28×28 px<br><span id="devinfo"></span></div>
+      </div>
+      <div id="results"><div class="empty">Draw a digit and hit Predict.</div></div>
+    </div>
+  </div>
+
+  <footer id="foot">
+    Accuracy on the 10,000-image MNIST test set — CNN (reduced LeNet):
+    <strong>97.1%</strong> · MLP (784→15→10): <strong>91.6%</strong>.
+    Served as ONNX graphs via onnxruntime.
+  </footer>
+</div>
+
+<script>
+// API base: same origin by default. Override with ?api=https://my-service.run.app
+// so the page can be hosted statically (GitHub Pages) against a remote backend.
+const API = new URLSearchParams(location.search).get('api')
+  || window.API_BASE || '';
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const widthEl = document.getElementById('width');
+const prev = document.getElementById('prev');
+const results = document.getElementById('results');
+let drawing = false, dirty = false;
+let PLACEHOLDER = '';
+
+function reset() {
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  dirty = false;
+}
+reset();
+
+// Fetch the placeholder thumbnail (a dimmed sample digit) from the API
+fetch(API + '/placeholder')
+  .then(r => r.json())
+  .then(d => { PLACEHOLDER = d.image; if (!prev.src) prev.src = PLACEHOLDER; })
+  .catch(() => {});
+
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return [(t.clientX - r.left) * canvas.width / r.width,
+          (t.clientY - r.top) * canvas.height / r.height];
+}
+
+function start(e) {
+  e.preventDefault();
+  drawing = true; dirty = true;
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = +widthEl.value;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  const p = pos(e);
+  ctx.moveTo(...p);
+  // Draw a dot straight away so a single tap/click leaves a mark instead of
+  // nothing (matters on touch, and for dotting a 1 or an i-style stroke).
+  ctx.lineTo(p[0], p[1]);
+  ctx.stroke();
+}
+function move(e) {
+  if (!drawing) return;
+  e.preventDefault();
+  ctx.lineTo(...pos(e));
+  ctx.stroke();
+}
+function end(e) {
+  if (!drawing) return;
+  e.preventDefault();
+  drawing = false;
+  if (document.getElementById('live').checked) run();
+}
+
+canvas.addEventListener('mousedown', start);
+canvas.addEventListener('mousemove', move);
+window.addEventListener('mouseup', end);
+canvas.addEventListener('touchstart', start);
+canvas.addEventListener('touchmove', move);
+canvas.addEventListener('touchend', end);
+
+document.getElementById('clear').onclick = () => {
+  reset();
+  prev.src = PLACEHOLDER;
+  prev.classList.add('ph');
+  document.getElementById('devinfo').textContent = '';
+  results.innerHTML = '<div class="empty">Draw a digit and hit Predict.</div>';
+};
+document.getElementById('predict').onclick = run;
+
+function block(name, cls, r) {
+  const bars = r.probs.map((p, i) => `
+    <span>${i}</span>
+    <div class="bar"><i style="width:${(p * 100).toFixed(1)}%"></i></div>
+    <span>${(p * 100).toFixed(1)}%</span>`).join('');
+  const verdict = r.no_signal
+    ? `<div class="digit">—</div>
+       <div class="conf">no signal: all ten logits identical</div>`
+    : `<div class="digit">${r.pred}</div>
+       <div class="conf">${(r.probs[r.pred] * 100).toFixed(1)}% confidence</div>`;
+  return `<div class="model ${cls}">
+    <h2>${name}</h2>
+    <div class="verdict">${verdict}</div>
+    <div class="bars">${bars}</div>
+  </div>`;
+}
+
+async function run() {
+  if (!dirty) return;
+  results.innerHTML = '<div class="empty">Scoring…</div>';
+  try {
+    const res = await fetch(API + '/predict', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({image: canvas.toDataURL('image/png')})
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const d = await res.json();
+    if (d.empty) {
+      results.innerHTML = '<div class="empty">Canvas is blank.</div>';
+      return;
+    }
+    prev.src = d.preview;
+    prev.classList.remove('ph');
+    // `runtime` is the current field; `device` is kept as a fallback so a
+    // separately hosted page still renders against an older API.
+    document.getElementById('devinfo').textContent = d.runtime || d.device || '';
+    results.innerHTML = block('Multilayer perceptron', 'mlp', d.MLP)
+                      + block('CNN', 'cnn', d.CNN);
+  } catch (err) {
+    results.innerHTML = `<div class="err">Could not reach the API (${err.message}).
+      If the service was idle it may be cold-starting — try again in a few seconds.</div>`;
+  }
+}
+</script>
+</body>
+</html>

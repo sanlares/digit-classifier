@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+*.ipynb
+*.png
+# Model files are pulled from object storage at runtime, never baked in
+*.pth
+*.onnx
+.git/
+.DS_Store

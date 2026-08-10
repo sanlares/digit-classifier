@@ -1,0 +1,24 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Coursework notebooks — not part of the service
+*.ipynb
+
+# MNIST is downloaded on demand by train_mlp.py / evaluate.py
+data/
+
+# Test output from test_local.py --save
+sample_drawing_*.png
+sample_input28_*.png
+
+# Superseded checkpoints. The current ones (mlp.pth, cnn.pth) and the exported
+# graphs (mlp.onnx, cnn.onnx) ARE committed — 600 KB total — so a fresh clone
+# runs and its tests pass with no training step and no network. That is a
+# deliberate exception for models this small; production still resolves the
+# artifacts from the model registry via WEIGHTS_URI, and the container image
+# never bakes them in (see .dockerignore).
+mlp20.pth
+cnn20.pth

@@ -1,0 +1,51 @@
+# Local end-to-end stack: the API plus a MinIO bucket standing in for S3/R2/GCS.
+# Exercises the exact same code path as production — the ONNX artifacts are
+# downloaded from object storage at startup, not read off the filesystem.
+# Run export_onnx.py first: the seed job bind-mounts mlp.onnx and cnn.onnx as
+# FILES, and Docker silently creates directories for anything missing.
+#
+#   docker compose up --build      ->  http://localhost:8080
+#   MinIO console                  ->  http://localhost:9001  (minioadmin/minioadmin)
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot job: create the bucket and upload the model artifacts
+  seed-weights:
+    image: minio/mc:latest
+    depends_on:
+      minio: { condition: service_healthy }
+    volumes:
+      - ./mlp.onnx:/w/mlp.onnx:ro
+      - ./cnn.onnx:/w/cnn.onnx:ro
+    entrypoint: >
+      sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/models &&
+      mc cp /w/mlp.onnx /w/cnn.onnx local/models/mnist/ &&
+      echo 'onnx artifacts uploaded'
+      "
+
+  api:
+    build: .
+    depends_on:
+      seed-weights: { condition: service_completed_successfully }
+    environment:
+      WEIGHTS_URI: s3://models/mnist
+      S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
+      PORT: 8080
+    ports: ["8080:8080"]

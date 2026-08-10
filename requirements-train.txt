@@ -1,0 +1,11 @@
+# Training and export only — never installed into the serving image.
+# CPU-only torch: the CUDA wheel is ~2.5 GB and useless for this.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+-r requirements.txt
+
+torch==2.13.0
+torchvision==0.28.0
+onnx==1.22.0
+onnxscript==0.7.1     # required by torch.onnx.export(dynamo=True)
+scikit-learn==1.9.0   # classification_report in evaluate.py

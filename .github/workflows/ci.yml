@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Runtime + test dependencies only. torch is deliberately absent: the
+      # suite exercises the serving path, which is exactly what ships in the
+      # image, and skipping a 200 MB wheel keeps CI under a minute.
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest
+
+      # Catches the mistake this project is built to avoid: a stray `import
+      # models` pulling torch into the serving path, which would silently add
+      # ~800 MB to the image and ~10 s to every cold start.
+      - name: Assert the serving path is torch-free
+        run: |
+          python -c "
+          import sys, server
+          leaked = [m for m in sys.modules if m.split('.')[0] in ('torch', 'torchvision')]
+          assert not leaked, f'torch leaked into the serving path: {leaked}'
+          print('serving path is torch-free')
+          "
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t mnist-classifier:ci .
+
+      - name: Boot it and check /health
+        run: |
+          docker run -d --name ci -p 8080:8080 \
+            -e WEIGHTS_URI=https://huggingface.co/dakinga/mnist-digit-classifier/resolve/main \
+            mnist-classifier:ci
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/health && break
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:8080/health | grep -q '"status":"ok"'
+          docker rm -f ci

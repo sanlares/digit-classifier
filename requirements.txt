@@ -1,0 +1,13 @@
+# Serving dependencies. Deliberately no torch: the models run as ONNX graphs,
+# which is what keeps the image under 300 MB and the cold start around a second.
+# For training and exporting, see requirements-train.txt.
+
+numpy==2.5.1
+pillow==12.3.0
+onnxruntime==1.28.0
+fastapi==0.141.1
+# Plain uvicorn, not [standard]: uvloop, websockets and watchfiles add ~30 MB
+# and buy nothing here — one process, no websockets, no --reload in production.
+uvicorn==0.52.1
+python-multipart==0.0.32
+boto3==1.43.67
