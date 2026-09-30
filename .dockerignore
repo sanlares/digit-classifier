@@ -4,8 +4,30 @@ __pycache__/
 data/
 *.ipynb
 *.png
-# Model files are pulled from object storage at runtime, never baked in
+# Training checkpoints are never needed at runtime
 *.pth
-*.onnx
+# NOTE: *.onnx is deliberately NOT ignored. The registry is the source of
+# truth, but a copy ships in the image so a registry outage degrades to a
+# stale model instead of a failed startup. See weights.py.
 .git/
 .DS_Store
+
+# Training, export and dev tooling. These import torch (or are simply not
+# needed to serve), and keeping them out is what lets the image use a blanket
+# `COPY *.py`. Excluding by name here is safer than an allowlist in the
+# Dockerfile: a new serving module is picked up automatically, whereas an
+# allowlist silently omits it and the container dies at import time.
+models.py
+train_mlp.py
+evaluate.py
+export_onnx.py
+publish_hf.py
+upload_weights.py
+test_local.py
+tests/
+docs/
+pytest.ini
+requirements-dev.txt
+requirements-train.txt
+.github/
+*.md

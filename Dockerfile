@@ -1,5 +1,8 @@
-# Code-only image: the .onnx artifacts are NOT baked in, they are pulled from
-# object storage at startup (see weights.py). Ship a new model without a rebuild.
+# The service resolves its models from the registry named by WEIGHTS_URI at
+# startup, so publishing a retrained model is an upload rather than a rebuild.
+# A copy of the artifacts still ships here as a fallback: the registry is a
+# third party on the startup path, and without a local copy one 429 from it
+# takes the whole service down. See weights.py.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -14,11 +17,17 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Explicit list, not `COPY *.py`: the training and export scripts import torch,
-# which is not installed here. Copying them in would be dead weight at best and
-# a confusing ImportError at worst.
-COPY server.py inference.py preprocess.py weights.py artifacts.py digits.py ./
+# Everything the service needs. The training and export scripts are excluded
+# in .dockerignore rather than omitted here: an allowlist in this file means a
+# newly added serving module is silently left out and the container dies on
+# `import` at startup — which is exactly what happened with security.py.
+COPY *.py ./
 COPY static/ ./static/
+
+# Fallback artifacts. The service resolves models from the registry named by
+# WEIGHTS_URI; these are what it serves if that registry is unreachable, which
+# is the difference between a stale model and a 503. ~300 KB.
+COPY *.onnx ./
 
 # Cloud Run, Hugging Face Spaces and most PaaS inject the port
 ENV PORT=8080

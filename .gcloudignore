@@ -15,8 +15,8 @@ data/
 *.pth
 *.ipynb
 
-# Model artifacts are fetched from object storage at runtime, never baked in
-*.onnx
+# NOTE: *.onnx must reach the build context — the image bundles them as the
+# fallback used when the model registry is unreachable (see weights.py).
 
 *.png
 !docs/demo.png

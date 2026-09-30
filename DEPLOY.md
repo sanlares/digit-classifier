@@ -9,9 +9,29 @@
   └──────────────────────┘       └──────────────────────────────────┘  on start)
 ```
 
-The image ships **code only**. Artifacts are pulled on startup into
-`/tmp/mnist-weights`, so you can publish a retrained model without rebuilding or
-redeploying the image.
+Artifacts are pulled on startup into `/tmp/mnist-weights`, so you can publish a
+retrained model without rebuilding or redeploying the image. A copy also ships inside
+the image as a fallback — see **Artifact resolution** below for why.
+
+## Artifact resolution
+
+On startup, each artifact is resolved in this order:
+
+1. **Local cache** (`WEIGHTS_CACHE`) if this instance already downloaded it.
+2. **The registry** at `WEIGHTS_URI`, retried with exponential backoff
+   (`WEIGHTS_RETRIES`, default 3). Retries cover 408/425/429 and 5xx; a 404 fails
+   fast because it will not fix itself.
+3. **The copy bundled in the image**, if the registry cannot be reached.
+
+Step 3 exists because of a real outage. Hugging Face returned `429 Too Many Requests`
+to the Cloud Run egress IP — an address shared across Google's infrastructure, so the
+limit can be reached by traffic that is not yours. `fetch` raised, startup failed, the
+container exited, and every request got a 503 until the registry relented. A
+scale-to-zero service re-fetches on every cold start, which makes that exposure
+constant rather than rare.
+
+`/health` always reports the winning source, including the failure that caused a
+fallback, so "is this serving the model I published?" has an answer.
 
 ## Configuration
 

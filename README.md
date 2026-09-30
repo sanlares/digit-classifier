@@ -24,15 +24,19 @@ drawing will underperform badly. The service replicates the original pipeline ex
 and the UI shows you the 28×28 array the network really receives, so the transformation
 is never a black box.
 
-**Model artifacts are decoupled from the container.** The image ships code only. The
-ONNX graphs live in object storage and are pulled into a local cache at startup, which
-means shipping a retrained model is an upload, not a rebuild and redeploy. It works
-against anything S3-compatible — AWS S3, Cloudflare R2, MinIO, GCS — or a plain HTTPS
-URL.
+**Model artifacts come from a registry, with a fallback that actually matters.** The
+ONNX graphs live in object storage — anything S3-compatible, or a plain HTTPS URL —
+and are pulled into a local cache at startup, so shipping a retrained model is an
+upload rather than a rebuild. The registry is also a third party on the startup path,
+though, and this service learned that the hard way: Hugging Face rate-limited the
+shared Cloud Run egress IP, the fetch raised, and the container exited on boot.
+Resolution is now cache → registry (retried with backoff) → a copy bundled in the
+image, and `/health` reports which one won. A registry hiccup costs you a stale model,
+not a 503.
 
 **Inference runs on ONNX Runtime, not PyTorch.** Torch is a build-time dependency used
-to train and export; it never enters the serving image. For two models totalling under
-300 KB of weights, shipping a 1 GB deep learning framework to run them is the wrong
+to train and export; it never enters the serving image. For two models totalling
+~300 KB of weights, shipping a 1 GB deep learning framework to run them is the wrong
 trade:
 
 | | With PyTorch | With ONNX Runtime |
