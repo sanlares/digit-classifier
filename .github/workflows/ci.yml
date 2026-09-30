@@ -1,10 +1,18 @@
-name: CI
+name: CI/CD
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+
+env:
+  PROJECT_ID: planar-granite-338613
+  PROJECT_NUMBER: "723611762821"
+  REGION: us-central1
+  SERVICE: mnist-digit-classifier
+  REPOSITORY: cloud-run-source-deploy
+  WEIGHTS_URI: https://huggingface.co/dakinga/mnist-digit-classifier/resolve/main
 
 jobs:
   test:
@@ -19,7 +27,7 @@ jobs:
 
       # Runtime + test dependencies only. torch is deliberately absent: the
       # suite exercises the serving path, which is exactly what ships in the
-      # image, and skipping a 200 MB wheel keeps CI under a minute.
+      # image, and skipping a 200 MB wheel keeps this job under a minute.
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
@@ -38,22 +46,127 @@ jobs:
           print('serving path is torch-free')
           "
 
-  docker:
+  # Builds the image once and, on main, pushes the exact artifact that was
+  # tested. Deploying a rebuilt image would mean shipping something no job in
+  # this run ever booted.
+  build:
     runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      id-token: write      # required to mint the OIDC token for GCP
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build the image
-        run: docker build -t mnist-classifier:ci .
+      - name: Compute image reference
+        id: meta
+        run: |
+          echo "image=${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${SERVICE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
+      - name: Build
+        run: docker build -t "${{ steps.meta.outputs.image }}" .
+
+      # Boot the real image before it is allowed anywhere near production.
+      # This is what caught security.py missing from the image's COPY list.
       - name: Boot it and check /health
         run: |
           docker run -d --name ci -p 8080:8080 \
-            -e WEIGHTS_URI=https://huggingface.co/dakinga/mnist-digit-classifier/resolve/main \
-            mnist-classifier:ci
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8080/health && break
+            -e WEIGHTS_URI="${WEIGHTS_URI}" \
+            "${{ steps.meta.outputs.image }}"
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/health >/dev/null && break
             sleep 2
           done
-          curl -sf http://127.0.0.1:8080/health | grep -q '"status":"ok"'
+          curl -sf http://127.0.0.1:8080/health | tee /dev/stderr | grep -q '"status":"ok"'
+
+      # The image carries a fallback copy of the artifacts precisely so a
+      # registry outage cannot stop a boot. Verify it is actually in there,
+      # because .dockerignore or .gcloudignore excluding *.onnx would silently
+      # remove the safety net.
+      - name: Verify the bundled fallback artifacts are present
+        run: |
+          docker run --rm --entrypoint sh "${{ steps.meta.outputs.image }}" \
+            -c 'ls /app/mlp.onnx /app/cnn.onnx'
           docker rm -f ci
+
+      - name: Authenticate to Google Cloud
+        if: github.ref == 'refs/heads/main'
+        uses: google-github-actions/auth@v2
+        with:
+          # Keyless. The provider trusts only this repository's OIDC token, so
+          # there is no service account key to leak or rotate.
+          workload_identity_provider: projects/723611762821/locations/global/workloadIdentityPools/github/providers/github
+          service_account: github-deployer@planar-granite-338613.iam.gserviceaccount.com
+
+      - name: Push
+        if: github.ref == 'refs/heads/main'
+        run: |
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker push "${{ steps.meta.outputs.image }}"
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/723611762821/locations/global/workloadIdentityPools/github/providers/github
+          service_account: github-deployer@planar-granite-338613.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${SERVICE}" \
+            --project "${PROJECT_ID}" \
+            --region "${REGION}" \
+            --image "${{ needs.build.outputs.image }}" \
+            --allow-unauthenticated \
+            --memory 512Mi --cpu 1 \
+            --min-instances 0 --max-instances 3 \
+            --concurrency 40 --timeout 30s \
+            --port 8080 \
+            --set-env-vars "WEIGHTS_URI=${WEIGHTS_URI}"
+
+      # A green deploy that serves 503 is not a green deploy.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Smoke test the live service
+        run: |
+          pip install --quiet pillow numpy
+          URL="$(gcloud run services describe "${SERVICE}" --project "${PROJECT_ID}" \
+                 --region "${REGION}" --format 'value(status.url)')"
+          echo "deployed: $URL"
+          curl -sf --retry 5 --retry-delay 3 --retry-all-errors "$URL/health" \
+            | tee /dev/stderr | grep -q '"status":"ok"'
+
+          # /health only proves the models loaded. Draw a real digit with the
+          # repo's own generator and assert the service reads it back.
+          python - "$URL" <<'PY'
+          import base64, io, json, sys, urllib.request
+          from digits import draw_digit
+
+          url = sys.argv[1]
+          buf = io.BytesIO()
+          draw_digit(7).save(buf, format="PNG")
+          request = urllib.request.Request(
+              f"{url}/predict",
+              data=json.dumps({"image": base64.b64encode(buf.getvalue()).decode()}).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          body = json.load(urllib.request.urlopen(request, timeout=60))
+          predictions = {name: body[name]["pred"] for name in ("MLP", "CNN")}
+          print("predictions:", predictions, "| artifacts:", body.get("device"))
+          assert body["CNN"]["pred"] == 7, f"CNN misread a drawn 7: {body['CNN']}"
+          PY
